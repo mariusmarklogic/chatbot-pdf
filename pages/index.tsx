@@ -1,0 +1,279 @@
+import { useRef, useState, useEffect, useMemo, useCallback } from 'react';
+import Layout from '@/components/layout';
+import styles from '@/styles/Home.module.css';
+import { Message } from '@/types/chat';
+import { fetchEventSource } from '@microsoft/fetch-event-source';
+import ReactMarkdown from 'react-markdown';
+import LoadingDots from '@/components/ui/LoadingDots';
+import { Document } from 'langchain/document';
+import { useRouter } from 'next/router';
+import {Accordion} from "@/components/ui/accordion";
+
+
+export default function Home() {
+  const router = useRouter();
+
+  const [query, setQuery] = useState<string>('');
+  const [loading, setLoading] = useState<boolean>(false);
+  const [sourceDocs, setSourceDocs] = useState<Document[]>([]);
+  const [error, setError] = useState<string | null>(null);
+  const [messageState, setMessageState] = useState<{
+    messages: Message[];
+    pending?: string;
+    history: [string, string][];
+    pendingSourceDocs?: Document[];
+  }>({
+    messages: [
+      {
+        message: `Hello, how can I help you?`,
+        type: 'apiMessage',
+      },
+    ],
+    history: [],
+    pendingSourceDocs: [],
+  });
+
+  const { messages, pending, history, pendingSourceDocs } = messageState;
+
+  const messageListRef = useRef<HTMLDivElement>(null);
+  const textAreaRef = useRef<HTMLTextAreaElement>(null);
+
+  useEffect(() => {
+    textAreaRef.current?.focus();
+  }, []);
+
+  //handle form submission
+  async function handleSubmit(e: any) {
+    e.preventDefault();
+
+    setError(null);
+
+    if (!query) {
+      alert('Please input a question');
+      return;
+    }
+
+    const question = query.trim();
+
+    setMessageState((state) => ({
+      ...state,
+      messages: [
+        ...state.messages,
+        {
+          type: 'userMessage',
+          message: question,
+        },
+      ],
+      pending: undefined,
+    }));
+
+    setLoading(true);
+    setQuery('');
+    setMessageState((state) => ({ ...state, pending: '' }));
+
+    const ctrl = new AbortController();
+    setSourceDocs([]);
+    try {
+      fetchEventSource('/api/chat', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          question,
+          history,
+        }),
+        signal: ctrl.signal,
+        onmessage: (event) => {
+          if (event.data === '[DONE]') {
+            setMessageState((state) => ({
+              history: [...state.history, [question, state.pending ?? '']],
+              messages: [
+                ...state.messages,
+                {
+                  type: 'apiMessage',
+                  message: state.pending ?? '',
+                  sourceDocs: state.pendingSourceDocs,
+                },
+              ],
+              pending: undefined,
+              pendingSourceDocs: undefined,
+            }));
+            setLoading(false);
+            ctrl.abort();
+          } else {
+            const data = JSON.parse(event.data);
+            if (data.sourceDocs) {
+              setMessageState((state) => ({
+                ...state,
+                pendingSourceDocs: data.sourceDocs,
+              }));
+              setSourceDocs(data.sourceDocs)
+            } else {
+              setMessageState((state) => ({
+                ...state,
+                pending: (state.pending ?? '') + data.data,
+              }));
+            }
+          }
+        },
+      });
+    } catch (error) {
+      setLoading(false);
+      setError('An error occurred while fetching the data. Please try again.');
+      console.log('error', error);
+    }
+  }
+
+  //prevent empty submissions
+  const handleEnter = useCallback(
+      (e: any) => {
+        if (e.key === 'Enter' && query) {
+          handleSubmit(e);
+        } else if (e.key == 'Enter') {
+          e.preventDefault();
+        }
+      },
+      [query],
+  );
+  const handleTermsClick = () => {
+    router.push('/terms-and-conditions');
+  };
+  const chatMessages = useMemo(() => {
+    return [
+      ...messages,
+      ...(pending
+          ? [
+            {
+              type: 'apiMessage',
+              message: pending,
+              sourceDocs: pendingSourceDocs,
+            },
+          ]
+          : []),
+    ];
+  }, [messages, pending, pendingSourceDocs]);
+
+  //scroll to bottom of chat
+  useEffect(() => {
+    if (messageListRef.current) {
+      messageListRef.current.scrollTop = messageListRef.current.scrollHeight;
+    }
+  }, [chatMessages]);
+  return (
+      <>
+        <Layout>
+          <div className="mx-auto flex flex-col gap-4">
+            <h1 className="text-2xl font-bold leading-[1.1] tracking-tighter text-center">
+              Chat with Your Marklogic Documents
+            </h1>
+            <main className={styles.main}>
+              <div className={styles.cloud}>
+                <div ref={messageListRef} className={styles.messagelist}>
+                  {chatMessages.map((message, index) => {
+                    console.log('chatMessage', chatMessages)
+                    let className;
+                    if (message.type === 'apiMessage') {
+                      return (
+                          <div key={`chatMessage-${index}`} className={styles.usermessage}>
+                            <div className={styles.markdownanswer}>
+                              <ReactMarkdown linkTarget="_blank">
+                                {message.message}
+                              </ReactMarkdown>
+                            </div>
+                          </div>
+                      )
+                    }
+                    if(message.type === "userMessage") {
+                      return (
+                          <>
+                            <div key={`chatMessage-${index}`} className={styles.clientMessage}>
+                              <div className={styles.markdownanswerClientMessage}>
+                                <ReactMarkdown linkTarget="_blank">
+                                  {message.message}
+                                </ReactMarkdown>
+                              </div>
+                            </div>
+                          </>
+                      );
+                    }
+                  })}
+                </div>
+              </div>
+              <div className={styles.center}>
+                <div className={styles.cloudform}>
+                  <form onSubmit={handleSubmit}>
+                  <textarea
+                      disabled={loading}
+                      onKeyDown={handleEnter}
+                      ref={textAreaRef}
+                      autoFocus={false}
+                      rows={1}
+                      maxLength={512}
+                      id="userInput"
+                      name="userInput"
+                      placeholder={
+                        loading
+                            ? 'Loading, don\'t close the page'
+                            : 'Ask me whatever you want'
+                      }
+                      value={query}
+                      onChange={(e) => setQuery(e.target.value)}
+                      className={styles.textarea}
+                  />
+                    <button
+                        type="submit"
+                        disabled={loading}
+                        className={styles.generatebutton}
+                    >
+                      {loading ? (
+                          <div className={styles.loadingwheel}>
+                            <LoadingDots color="#000" />
+                          </div>
+                      ) : (
+                          // Send icon SVG in input field
+                          <svg
+                              viewBox="0 0 20 20"
+                              className={styles.svgicon}
+                              xmlns="http://www.w3.org/2000/svg"
+                          >
+                            <path d="M10.894 2.553a1 1 0 00-1.788 0l-7 14a1 1 0 001.169 1.409l5-1.429A1 1 0 009 15.571V11a1 1 0 112 0v4.571a1 1 0 00.725.962l5 1.428a1 1 0 001.17-1.408l-7-14z"></path>
+                          </svg>
+                      )}
+                    </button>
+                  </form>
+                </div>
+              </div>
+              {sourceDocs.length > 0 && (
+                  <div className="p-5" style={{width: "80%"}}>
+                    <Accordion type="single" collapsible className="flex-col">
+                      {sourceDocs.map((doc, index: number) =>
+                      {
+                        if(index < 3)
+                          return (
+                            <div key={`SourceDocs-${index}`} style={{width: '100%', paddingBottom: '1.5rem'}}>
+                              <h3 style={{fontWeight: 'bold'}}>Source {index + 1}</h3>
+                              <ReactMarkdown linkTarget="_blank">
+                                    {doc.pageContent}
+                                </ReactMarkdown>
+                                {/*<p> <span style={{fontWeight: 'bold'}}>Source: </span>{doc.metadata.source}</p>*/}
+                            </div>
+                      )
+                      }
+                      )}
+                    </Accordion>
+                  </div>
+                )}
+              {error && (
+                  <div className="border border-red-400 rounded-md p-4">
+                    <p className="text-red-500">{error}</p>
+                  </div>
+              )}
+            </main>
+          </div>
+          <footer className="m-auto p-4">
+          </footer>
+        </Layout>
+      </>
+  );
+}
